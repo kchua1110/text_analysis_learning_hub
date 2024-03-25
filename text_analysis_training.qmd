@@ -1,0 +1,343 @@
+---
+title: "text_analysis"
+format: html
+---
+
+## Loading data (stinger)
+
+```{r}
+
+install.packages("ggwordcloud")
+
+library(dplyr)       ### for general tidy data practices
+library(tidyr)       ### for general tidy data practices
+library(readr)       ### for reading in data
+library(purrr)       ### toolkit for working with functions and vectors
+library(forcats)     ### for working with factors
+library(stringr)     ### for manipulating strings
+library(tidytext)    ### to support text analysis using tidy data methods
+library(pdftools)    ### to extract text data from .pdf documents
+library(ggwordcloud) ### to generate a word cloud
+library(ggplot2)
+
+```
+
+## Loading data
+
+```{r}
+
+coral_narrs <- read_csv('data/iucn_narratives.csv')
+### interested in species_id, habitat
+
+coral_info <- read_csv('data/coral_spp_info.csv')
+### info for species mapped in both datasets
+
+### create a dataframe with just ID, scientific name, and habitat
+coral_habs_raw <- coral_narrs %>%
+  left_join(coral_info, by = 'iucn_sid') %>%
+  select(iucn_sid, sciname, habitat)
+
+```
+
+## Exploring data 
+
+```{r}
+
+coral_habs_raw$habitat[1] # want the 10m info for analysis
+
+#coral_habs <- coral_habs_raw %>%
+  #split into individual sentences %>%
+  #keep the sentences with numbers in them %>%
+  #isolate the numbers
+
+```
+
+## Intro to `stringr` function -- toy example
+
+```{r}
+
+x <- "Everybody's got something to hide except for me and my monkey"
+
+### Manipulate string case (upper, lower, sentence, title)
+stringr::str_to_title(x)
+str_to_lower(x) # covert everything to lowercase, not have to think about capitalized
+str_to_upper(x)
+
+### Split strings into multiple pieces, based on some pattern
+str_split(x, 'hide'); str_split(x, 't')
+
+### Replace a pattern in a string with a different pattern
+str_replace(x, 'except for', 'including')
+str_replace(x, ' ', '_')
+str_replace_all(x, ' ', '_')
+
+### Detect whether a pattern is found within a string
+str_detect(x, 't'); str_detect(x, 'monk') ### is pattern in the string? T/F
+
+### Extract instances of patterns within a string.  Note: this is far more
+### powerful and interesting when using wildcards in your pattern!
+str_extract(x, 't'); str_extract_all(x, 'y')
+
+### Locate the start and endpoint of a pattern within a string
+str_locate(x, 't'); str_locate_all(x, 'y')
+
+```
+
+
+```{r}
+
+coral_habs <- coral_habs_raw %>%
+  mutate(hab_cut = str_split(habitat, '\\. ')) %>%
+  unnest(hab_cut) %>%
+  filter(str_detect(hab_cut, '[0-9]'))
+
+```
+
+```{r}
+
+coral_depth <- coral_habs %>%
+  filter(str_detect(hab_cut, '[0-9] m')) %>%
+  mutate(depth = str_extract(hab_cut, '[0-9] m'))
+
+```
+
+
+```{r}
+
+years <- coral_habs %>%
+  mutate(year = str_extract(hab_cut, '[0-9]{4}')) 
+### looks for four numbers together
+
+coral_depth <- coral_habs %>%
+  filter(str_detect(hab_cut, '[0-9] m')) %>%
+  mutate(depth = str_extract(hab_cut, '[0-9]+ m')) 
+### looks for one or more numbers, followed by ' m'
+### Still misses the ranges e.g. "3-30 m" - how to capture?
+
+### let it also capture "-" in the brackets
+coral_depth <- coral_habs %>%
+  filter(str_detect(hab_cut, '[0-9] m')) %>%
+  mutate(depth = str_extract(hab_cut, '[0-9-]+ m'))
+
+```
+
+```{r}
+
+### split 'em (using the "not" qualifier), convert to numeric, keep the largest
+coral_depth <- coral_habs %>%
+  filter(str_detect(hab_cut, '[0-9] m')) %>%
+  mutate(depth_char = str_extract(hab_cut, '[0-9-]+ m'),
+         depth_num = str_split(depth_char, '[^0-9]'),
+         depth_num2 = str_extract(depth_char, '[0-9]+')) %>%
+  unnest(depth_num)
+
+coral_depth <- coral_depth %>%
+  mutate(depth_num = as.numeric(depth_num)) %>%
+  filter(!is.na(depth_num)) %>%
+  group_by(iucn_sid, sciname) %>%
+  mutate(depth_num = max(depth_num),
+         n = n()) %>%
+  distinct()
+
+```
+
+
+## PDF text
+
+```{r}
+
+
+pdf_smith <- file.path('pdfs/smith_wilen_2003.pdf')
+
+smith_text <- pdf_text(pdf_smith)
+
+```
+
+```{r}
+
+smith_df <- data.frame(text = smith_text) # one row per page
+
+smith_df <- data.frame(text = smith_text) %>%
+  mutate(page = 1:n()) %>%
+  mutate(text_sep = str_split(text, '\\n')) %>% # split by line, text_set=lists of lines 
+  unnest(text_sep) # separate lists into rows
+
+smith_df <- data.frame(text = smith_text) %>%
+  mutate(page = 1:n()) %>%
+  mutate(text_sep = str_split(text, '\\n')) %>%
+  unnest(text_sep) %>%
+  group_by(page) %>%
+  mutate(line = 1:n()) %>% # add line #s by page
+  ungroup()
+```
+
+```{r}
+
+smith_df %>% filter(page == 8 & between(line, 7, 25)) %>% pull(text_sep)
+
+### We want to extract data from the table on page 8
+page8_df <- smith_df %>%
+  filter(page == 8)
+
+### Let's just brute force cut out the table
+col_lbls <- c('n_patches', paste0('y', 1988:1999))
+
+table1_df <- page8_df %>%
+  filter(line %in% 8:18) %>%
+  separate(col = text_sep, into = col_lbls, sep = ' +') 
+
+```
+
+
+## Sentiment analysis
+
+```{r}
+
+nyt_files <- list.files('data', pattern = 'nytimes.+txt', full.names = TRUE) #the pattern could be nytimes but need the period so it indicates any kind of character after the "s"
+nyt_text <- purrr::map_chr(nyt_files, read_file)
+nyt_df <- data.frame(text = nyt_text, file = basename(nyt_files)) %>%
+  ### because the dates are in yyyy-mm-dd format (with dashes), extract with:
+  mutate(date = str_extract(file, '[0-9-]+')) %>%
+  ### Isolate the title: keep everything up to the first carriage return
+  mutate(title = str_extract(text, '^.+(?=(\r|\n))')) 
+# ^: start at the beginning of the string
+# .: match any character (period as wildcard)
+# +: repeat the previous match (in this case, any character) one or more times
+# (?=(\r|\n)): look ahead to see if there is either a \r or a \n:
+# (?=...) starts a “lookahead assertion”
+# (\r|\n) matches either the carriage return \r OR (|) the end of line \n.
+
+```
+
+## Word counts
+
+```{r}
+
+nyt_words_df <- nyt_df %>% 
+  unnest_tokens(output = word, input = text, token = 'words') # every word in the article in the order that it appears
+
+nyt_wordcount <- nyt_words_df %>% 
+  group_by(date, word) %>%
+  summarize(n = n(), .groups = 'drop')
+
+```
+
+
+# Remove stop words
+
+```{r}
+
+nyt_words_clean <- nyt_words_df %>% 
+  anti_join(stop_words, by = 'word') %>% #take all the things that are in the NYT article and match it with the stop words, remove them
+  filter(!str_detect(word, '[0-9]')) #also remove any numbers
+
+nyt_wordcount <- nyt_words_clean %>% 
+  group_by(date, word) %>%
+  summarize(n = n(), .groups = 'drop')
+
+```
+
+## Word freq -- good place to start but on it's own may not be helpful
+
+```{r}
+
+top_5_words <- nyt_wordcount %>% 
+  group_by(date) %>% 
+  slice_max(order_by = n, n = 5) %>%
+  ungroup()
+
+ggplot(data = top_5_words, aes(x = n, y = word)) +
+  geom_col(fill = "blue") +
+  facet_wrap(~date, scales = "free")
+
+```
+
+## Word cloud -- also a word freq visualization 
+
+```{r}
+
+top25 <- nyt_wordcount %>% 
+  filter(date == first(date)) %>%
+  slice_max(order_by = n, n = 25)
+
+word_cloud <- ggplot(data = top25, aes(label = word)) +
+  geom_text_wordcloud(aes(color = n, size = n), shape = "diamond") +
+  scale_size_area(max_size = 10) +
+  scale_color_gradientn(colors = c("darkgreen","blue","purple")) +
+  theme_minimal()
+
+word_cloud
+
+```
+## Sentiment analysis -- commonly used lexicons, attaches an emotion to the word
+
+```{r}
+
+afinn_lex <- get_sentiments(lexicon = "afinn")
+### you may be prompted to download an updated lexicon - say yes!
+
+# Let's look at the pretty positive words:
+afinn_pos <- get_sentiments("afinn") %>% 
+  filter(value %in% c(3,4,5))
+
+```
+
+```{r}
+
+bing_lex <- get_sentiments(lexicon = "bing")
+
+```
+
+
+```{r}
+
+nrc_lex <- get_sentiments(lexicon = "nrc")
+
+```
+
+
+```{r}
+
+nyt_bing <- nyt_words_clean %>% 
+  inner_join(bing_lex, by = 'word') # only keeps the words that match up and drops everything else, removes words that couldn't be assigned a value
+
+```
+
+```{r}
+
+bing_counts <- nyt_bing %>% 
+  group_by(date, sentiment) %>%
+  summarize(n = n()) %>%
+  ungroup()
+
+```
+
+```{r}
+
+# Plot them: 
+ggplot(data = bing_counts, aes(x = sentiment, y = n)) +
+  geom_col() +
+  facet_wrap(~date)
+```
+## Normalize the data and plot
+
+```{r}
+
+### find log ratio score overall:
+bing_log_ratio_all <- nyt_bing %>% 
+  summarize(n_pos = sum(sentiment == 'positive'),
+            n_neg = sum(sentiment == 'negative'),
+            log_ratio = log(n_pos / n_neg))
+
+### Find the log ratio score by article (date): 
+bing_log_ratio_article <- nyt_bing %>% 
+  group_by(date, title) %>% 
+  summarize(n_pos = sum(sentiment == 'positive'),
+            n_neg = sum(sentiment == 'negative'),
+            log_ratio = log(n_pos / n_neg),
+            .groups = 'drop') %>%
+  mutate(log_ratio_adjust = log_ratio - bing_log_ratio_all$log_ratio) %>% # looking for relative positivity or negativity so want to remove the "background" tone (e.g., GoT is overall negative, but if you subtract that out, then you can see if the chapter texts might be more or less positive rather than just only all negative )
+  mutate(pos_neg = ifelse(log_ratio_adjust > 0, 'pos', 'neg'))
+
+```
+
